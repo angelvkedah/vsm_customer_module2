@@ -20,7 +20,7 @@
 # 1. Клонирование репозитория
 
 ```bash
-git clone https://github.com/angelvkedah/VSM_customer_module.git
+git clone https://github.com/angelvkedah/vsm_customer_module2.git
 ```
 
 # 2. Переход в директорию проекта
