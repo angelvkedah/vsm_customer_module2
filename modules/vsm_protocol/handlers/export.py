@@ -57,7 +57,7 @@ def build_human_readable_entry(row):
     carnumber = format_car_number(row.get("carnumber", ""))
     timestamp = row.get("timestamp", None)
 
-    timestamp_str = format_datetime(timestamp)
+    timestamp_str = format_datetime(timestamp).split(" ")[1] if timestamp else ""
     message_text = get_protocol_message_text(row)
 
     lines = []
@@ -65,10 +65,10 @@ def build_human_readable_entry(row):
     header_parts = []
 
     if train_id:
-        header_parts.append(f"поезд {train_id}")
+        header_parts.append(f"{train_id}")
 
     if carnumber:
-        header_parts.append(f"вагон {carnumber}")
+        header_parts.append(f"{carnumber}")
 
     if header_parts:
         lines.append(", ".join(header_parts) + ".")
@@ -162,42 +162,22 @@ def export_to_docx(timeline_df, train_human_name, dt_from, dt_to, selected_colum
     try:
         doc = Document()
 
-        title = doc.add_heading("Эксплуатационный протокол", 0)
-        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        setup_document_styles(doc)
+        add_protocol_header(doc)
+        add_protocol_footer(doc)
 
-        doc.add_paragraph(f"Поезд: {train_human_name}")
-        doc.add_paragraph(f"Период: с {format_datetime(dt_from)} по {format_datetime(dt_to)}")
-        doc.add_paragraph(f"Дата формирования: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
-        doc.add_paragraph("")
+        add_subject_block(
+            doc,
+            train_human_name,
+            dt_from,
+            dt_to
+        )
 
-        if not selected_columns:
-            selected_columns = [
-                "train_id",
-                "carnumber",
-                "messagecode",
-                "event_type",
-                "timestamp",
-                "message_text",
-            ]
-
-        column_names = get_column_names_map()
-        selected_cols = [col for col in selected_columns if col in timeline_df.columns]
-        headers = [column_names.get(col, col) for col in selected_cols]
-
-        table = doc.add_table(rows=1, cols=len(headers))
-        table.style = "Table Grid"
-
-        for i, header in enumerate(headers):
-            cell = table.rows[0].cells[i]
-            cell.text = header
-            for paragraph in cell.paragraphs:
-                for run in paragraph.runs:
-                    run.font.bold = True
-
-        for _, row in timeline_df.iterrows():
-            cells = table.add_row().cells
-            for i, col in enumerate(selected_cols):
-                cells[i].text = str(prepare_row_for_export(row, col))
+        add_protocol_table(
+            doc,
+            timeline_df,
+            selected_columns=selected_columns
+        )
 
         doc_bytes = io.BytesIO()
         doc.save(doc_bytes)
@@ -363,17 +343,14 @@ def add_subject_block(doc, train_human_name, dt_from, dt_to):
     subject = doc.add_paragraph()
     set_paragraph_spacing(subject, before=18, after=14)
 
-    run_label = subject.add_run("Предмет протокола: ")
-    set_run_font(run_label, size=14, bold=True)
-
     date_part = format_datetime(dt_from).split(" ")[0] if dt_from else ""
     time_from = format_datetime(dt_from).split(" ")[1] if dt_from else ""
     time_to = format_datetime(dt_to).split(" ")[1] if dt_to else ""
 
     run_value = subject.add_run(
-        f"{train_human_name} от {date_part}г. "
-        f"в период {time_from} – {time_to}"
+        f"{train_human_name} за период {date_part} {time_from} – {time_to}"
     )
+
     set_run_font(run_value, size=14, bold=True)
 
 
@@ -401,6 +378,154 @@ def add_no_events_paragraph(doc):
         "За указанный период диагностические события не обнаружены."
     )
     set_run_font(run, size=12)
+
+def set_table_cell_shading(cell, fill_color):
+    tc_pr = cell._tc.get_or_add_tcPr()
+    shading = OxmlElement("w:shd")
+    shading.set(qn("w:fill"), fill_color)
+    tc_pr.append(shading)
+
+
+def set_table_cell_width(cell, width_inches):
+    tc_pr = cell._tc.get_or_add_tcPr()
+    tc_w = OxmlElement("w:tcW")
+    tc_w.set(qn("w:w"), str(int(width_inches * 1440)))
+    tc_w.set(qn("w:type"), "dxa")
+    tc_pr.append(tc_w)
+
+
+def format_table_cell(cell, text, font_size=9, bold=False, align="left"):
+    cell.text = ""
+
+    paragraph = cell.paragraphs[0]
+
+    if align == "center":
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    elif align == "right":
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    else:
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(0)
+    paragraph.paragraph_format.line_spacing = 1.0
+
+    run = paragraph.add_run(clean_text(text))
+    set_run_font(run, size=font_size, bold=bold)
+
+
+def prepare_table_value(row, col):
+    if col == "carnumber":
+        return format_car_number(row.get(col, ""))
+
+    if col == "messagecode":
+        code = safe_str(row.get(col, ""))
+        return f"[{code}]" if code else ""
+
+    if col == "message_text":
+        return get_protocol_message_text(row)
+
+    return str(prepare_row_for_export(row, col))
+
+
+def add_protocol_table(doc, timeline_df, selected_columns=None):
+    if timeline_df is None or timeline_df.empty:
+        add_no_events_paragraph(doc)
+        return
+
+    if not selected_columns:
+        selected_columns = [
+            "train_id",
+            "carnumber",
+            "messagecode",
+            "event_type",
+            "timestamp",
+            "message_text",
+        ]
+
+    column_names = get_column_names_map()
+    selected_cols = [
+        col for col in selected_columns
+        if col in timeline_df.columns
+    ]
+
+    if not selected_cols:
+        selected_cols = [
+            "train_id",
+            "carnumber",
+            "messagecode",
+            "event_type",
+            "timestamp",
+            "message_text",
+        ]
+        selected_cols = [
+            col for col in selected_cols
+            if col in timeline_df.columns
+        ]
+
+    headers = [
+        column_names.get(col, col)
+        for col in selected_cols
+    ]
+
+    table = doc.add_table(rows=1, cols=len(headers))
+    table.style = "Table Grid"
+    table.autofit = False
+
+    # Примерные ширины колонок под A4
+    width_map = {
+        "train_id": 0.65,
+        "carnumber": 0.45,
+        "messagecode": 0.55,
+        "event_type": 0.65,
+        "timestamp": 1.15,
+        "message_text": 4.35,
+        "duration_str": 0.75,
+        "parsingtime": 1.10,
+    }
+
+    header_cells = table.rows[0].cells
+
+    for i, header in enumerate(headers):
+        col = selected_cols[i]
+        cell = header_cells[i]
+
+        set_table_cell_shading(cell, "D9D9D9")
+        set_table_cell_width(cell, width_map.get(col, 1.0))
+        format_table_cell(
+            cell,
+            header,
+            font_size=9,
+            bold=True,
+            align="center"
+        )
+
+    # Повтор заголовка таблицы на новых страницах
+    tr_pr = table.rows[0]._tr.get_or_add_trPr()
+    tbl_header = OxmlElement("w:tblHeader")
+    tbl_header.set(qn("w:val"), "true")
+    tr_pr.append(tbl_header)
+
+    for _, row in timeline_df.iterrows():
+        cells = table.add_row().cells
+
+        for i, col in enumerate(selected_cols):
+            value = prepare_table_value(row, col)
+            cell = cells[i]
+
+            set_table_cell_width(cell, width_map.get(col, 1.0))
+
+            align = "left"
+            if col in ["messagecode", "event_type", "carnumber"]:
+                align = "center"
+
+            format_table_cell(
+                cell,
+                value,
+                font_size=8,
+                bold=False,
+                align=align
+            )
 
 def export_human_readable_docx(timeline_df, train_human_name, dt_from, dt_to, selected_columns=None):
     try:
